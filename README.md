@@ -14,16 +14,15 @@ The **Smart School Bus Management System** is an embedded system integrating **R
 - **ESP32 Microcontroller**: Central processing unit
 - **RFID Module**: Tracks student attendance
 - **GPS Module**: Provides real-time location tracking
-- **GSM/GPRS Module**: wireless communication via GSM/GPRS
-- **Wi-Fi Module (ESP32 Built-in)**: Sends data to the cloud
+- **GSM/GPRS Module**: wireless communication via GSM/GPRS as a backup when there is no wifi network is available
+- **Wi-Fi Module (ESP32 Built-in)**: Upload data to the cloud when a wifi network is available
 - **Power Supply Circuit**: Ensures stable power delivery
 - **Backup Battery**: Supplies power during outages
 
 ### **Communication Protocols**
-- **I2C**: For OLED display communication
 - **UART**: For integrating RFID and GPS modules
 - **MQTT**: Real-time data broadcasting to a central dashboard
-- **HTTP**: API-based communication between the cloud and dashboard
+- **HTTP and REST API**: API-based communication between the cloud and dashboard
 - **AES Encryption**: Secures RFID attendance logs and location updates
 
 ## Installation & Setup
@@ -59,4 +58,4 @@ This project is licensed under the MIT License.
 [GitHub Repository](https://github.com/amodhyh/school-bus-tracking-system.git)
 
 ## notes 
-This project was developed as part of the **Embedded Systems EC6020** course in University Of Jaffna Faculty of Engineering to gain more hands on experience with the IOT and embedded systems
+This project was developed as part of the **Embedded Systems EC6020** course in University Of Jaffna,Faculty of Engineering to gain more hands on experience with the IOT and embedded systems.
