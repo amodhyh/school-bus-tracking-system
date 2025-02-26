@@ -15,7 +15,6 @@ The **Smart School Bus Management System** is an embedded system integrating **R
 - **RFID Module**: Tracks student attendance
 - **GPS Module**: Provides real-time location tracking
 - **GSM/GPRS Module**: wireless communication via GSM/GPRS
-- **OLED Display**: Displays notifications
 - **Wi-Fi Module (ESP32 Built-in)**: Sends data to the cloud
 - **Power Supply Circuit**: Ensures stable power delivery
 - **Backup Battery**: Supplies power during outages
