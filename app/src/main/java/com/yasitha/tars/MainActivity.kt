@@ -21,7 +21,7 @@ class MainActivity : ComponentActivity() {
             TARSTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Greeting(
-                        name = "TARS ",
+                        name = "Smart Bus Tracking System ",
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -35,6 +35,9 @@ fun Greeting(name: String, modifier: Modifier = Modifier) {
     Text(
         text = "$name",
         modifier = modifier
+    )
+    Text(
+        text="Hello This is a test"
     )
 }
 
