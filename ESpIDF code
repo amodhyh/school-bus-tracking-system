@@ -1,0 +1,321 @@
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#include <freertos/FreeRTOS.h> // For vTaskDelay
+#include <freertos/task.h>     // For vTaskDelay
+
+#include <driver/uart.h>       // ESP-IDF UART
+#include <driver/gpio.h>       // ESP-IDF GPIO
+#include <esp_wifi.h>          // ESP-IDF Wi-Fi
+#include <esp_event.h>         // ESP-IDF Event Handling
+#include <nvs_flash.h>         // Non-Volatile Storage
+#include <esp_log.h>           // Logging
+
+#include <FirebaseESP32.h>    
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+
+// --- Configuration ---
+#define WIFI_SSID "Lord-Chan"
+#define WIFI_PASSWORD "123456789"
+#define API_KEY "AIzaSyBiUGxrFi9u3KJACtJVq8nQ0lOMUUm1mFY"
+#define DATABASE_URL "https://tars-9c256-default-rtdb.asia-southeast1.firebasedatabase.app/"
+
+#define GPS_RX_PIN 16
+#define GPS_TX_PIN 17
+#define RFID_SDA_PIN 5
+#define RFID_RST_PIN 22
+#define RFID_SCK_PIN 18
+#define RFID_MOSI_PIN 23
+#define RFID_MISO_PIN 19
+
+#define GPS_UART_PORT UART_NUM_2 // Example UART port for GPS
+#define RFID_SPI_HOST SPI2_HOST  // Example SPI host for RFID (if SPI)
+
+#define FIREBASE_USER_EMAIL "amodhwork@gmail.com"
+#define FIREBASE_USER_PASSWORD "123456"
+
+// --- Firebase Objects (from Arduino Library - for conceptual structure) ---
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// --- Structures ---
+typedef struct {
+    char student_id[15];
+    time_t attendance_time;
+    double latitude;
+    double longitude;
+} AttendanceRecord;
+
+//  Functions
+void initialize_wifi();
+void initialize_firebase();
+void initialize_gps();
+int get_gps_location(double *latitude, double *longitude);
+void initialize_rfid();
+int read_rfid_card(char *studentID);
+void send_bus_location_to_firebase(double latitude, double longitude);
+void save_attendance_record_firebase(AttendanceRecord record);
+void mark_attendance(char *studentID, double latitude, double longitude);
+char* get_current_timestamp();
+void app_main(); // ESP-IDF app_main entry point
+
+
+// --- Function Implementations ---
+
+void tokenStatusCallback(TokenInfo info) {
+    ESP_LOGI("Firebase", "Token info: %d", info.status); // Using ESP_LOGI for logging
+}
+void initialize_firebase() {
+    ESP_LOGI("Firebase", "Initializing Firebase...");
+    config.api_key = API_KEY;
+    config.database_url = DATABASE_URL;
+    auth.user.email = FIREBASE_USER_EMAIL;
+    auth.user.password = FIREBASE_USER_PASSWORD;
+    config.token_status_callback = tokenStatusCallback;
+    Firebase.begin(&config, &auth);
+    Firebase.reconnectWiFi(true);
+    ESP_LOGI("Firebase", "Firebase Initialized.");
+}
+
+void initialize_wifi() {
+    ESP_LOGI("WiFi", "Initializing WiFi...");
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    esp_netif_init();
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, &instance_got_ip));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .capable = true,
+                .required = false
+            },
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_start() );
+
+    ESP_LOGI("WiFi", "WiFi initialization finished.");
+
+    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or failure to connect for maximum_retry times (WIFI_FAIL_BIT). The bits are set by event handler */
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+            pdFALSE,
+            pdFALSE,
+            portMAX_DELAY);
+
+    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually happened. */
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI("WiFi", "connected to ap SSID:%s password:%s", WIFI_SSID, WIFI_PASSWORD);
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGI("WiFi", "Failed to connect to SSID:%s, password:%s", WIFI_SSID, WIFI_PASSWORD);
+    } else {
+        ESP_LOGE("WiFi", "UNEXPECTED EVENT");
+    }
+
+    /* The event group allows multiple bits for each event, but we only need two bits for the two events:
+     * WIFI_CONNECTED_BIT and WIFI_FAIL_BIT.
+     */
+    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
+    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
+    vEventGroupDelete(s_wifi_event_group);
+}
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+    static int s_retry_num = 0;
+    if (event_type == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_type == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI("WiFi", "retry to connect to the AP");
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        ESP_LOGI("WiFi","connect to the AP fail");
+    } else if (event_type == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI("WiFi", "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+    void* user_context;
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI("WiFi", "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+
+void initialize_gps() {
+    ESP_LOGI("GPS", "Initializing GPS Module...");
+    uart_config_t uart_config = {
+        .baud_rate = 9600, 
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_CLK_DEFAULT,
+    };
+    ESP_ERROR_CHECK(uart_param_config(GPS_UART_PORT, &uart_config));
+    ESP_ERROR_CHECK(uart_driver_install(GPS_UART_PORT, 2048, 0, 0, NULL, 0)); //  buffer sizes 
+    ESP_ERROR_CHECK(uart_set_pin(GPS_UART_PORT, GPS_TX_PIN, GPS_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); // TX, RX, RTS, CTS
+    ESP_LOGI("GPS", "GPS Module Initialized on UART%d, TX=%d, RX=%d", GPS_UART_PORT, GPS_TX_PIN, GPS_RX_PIN);
+}
+
+int get_gps_location(double *latitude, double *longitude) {
+    // --- Placeholder GPS location ---
+    static double fake_lat = 6.9271;
+    static double fake_lon = 79.8612;
+    *latitude = fake_lat;
+    *longitude = fake_lon;
+    return 0;
+    //  actual GPS NMEA parsing using UART read ---
+}
+
+void initialize_rfid() {
+    ESP_LOGI("RFID", "Initializing RFID Reader...");
+    // ---  RFID Initialization ---
+    ESP_LOGI("RFID", "RFID Reader Initialized.");
+    // ---   actual RFID SPI or UART initialization using ESP-IDF SPI/UART APIs ---
+}
+
+int read_rfid_card(char *studentID) {
+    static int card_scan_counter = 0;
+    card_scan_counter++;
+    if (card_scan_counter > 5) {
+        strcpy(studentID, "STUDENT123");
+        card_scan_counter = 0;
+        return 0;
+    }
+    return -1;
+    //  actual RFID reading using SPI/UART and RFID library or direct hardware access ---
+}
+void send_bus_location_to_firebase(double latitude, double longitude) {
+    if (Firebase.ready()) {
+        char locationPath[] = "/bus_location";
+        FirebaseJson locationJson;
+        locationJson.set("latitude", latitude);
+        locationJson.set("longitude", longitude);
+        locationJson.set("timestamp", (long)time(NULL));
+
+        if (!Firebase.updateNode(fbdo, locationPath, locationJson)) {
+            ESP_LOGE("Firebase", "Firebase update bus location failed: %s", fbdo.errorReason().c_str());
+        } else {
+            ESP_LOGI("Firebase", "Bus location updated to Firebase");
+        }
+    } else {
+        ESP_LOGW("Firebase", "Firebase not ready, cannot send bus location");
+    }
+}
+
+void save_attendance_record_firebase(AttendanceRecord record) {
+    if (Firebase.ready()) {
+        char attendancePath[50];
+        sprintf(attendancePath, "/attendance/%ld", record.attendance_time);
+
+        FirebaseJson attendanceJson;
+        attendanceJson.set("student_id", record.student_id);
+        attendanceJson.set("latitude", record.latitude);
+        attendanceJson.set("longitude", record.longitude);
+        attendanceJson.set("timestamp", (long)record.attendance_time);
+
+        if (!Firebase.push(fbdo, attendancePath, attendanceJson)) {
+            ESP_LOGE("Firebase", "Firebase push attendance failed: %s", fbdo.errorReason().c_str());
+        } else {
+            ESP_LOGI("Firebase", "Attendance record pushed to Firebase");
+        }
+    } else {
+        ESP_LOGW("Firebase", "Firebase not ready, cannot save attendance");
+    }
+}
+
+
+void mark_attendance(char *studentID, double latitude, double longitude) {
+    AttendanceRecord record;
+    strcpy(record.student_id, studentID);
+    record.attendance_time = time(NULL);
+    record.latitude = latitude;
+    record.longitude = longitude;
+
+    printf("Attendance Marked for Student ID: %s at %s\n", record.student_id, get_current_timestamp());
+    printf("Location: Latitude: %f, Longitude: %f\n", record.latitude, record.longitude);
+
+    save_attendance_record_firebase(record);
+}
+char* get_current_timestamp() {
+    time_t timer;
+    char* buffer = malloc(26);
+    struct tm* tm_info;
+    time(&timer);
+    tm_info = localtime(&timer);
+    strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+    return buffer;
+}
+
+
+void app_main() { // ESP-IDF entry point
+    stdio_init_all(); // Initialize standard IO (for printf)
+
+    ESP_LOGI("Main", "Starting app_main");
+
+    initialize_wifi(); // Initialize Wi-Fi first
+    initialize_firebase();
+    initialize_gps();
+    initialize_rfid();
+
+    time_t timer;
+    time(&timer);
+    printf("Current time : %s", ctime(&timer));
+
+
+    double current_latitude, current_longitude;
+    char scanned_student_id[15] = "";
+    unsigned long last_gps_send_time = 0;
+    const long gps_interval = 10000; // 10 seconds
+
+    while (1) {
+        if (get_gps_location(&current_latitude, &current_longitude) == 0) {
+            if (esp_timer_get_time() / 1000 - last_gps_send_time >= gps_interval) { // Using esp_timer for time
+                last_gps_send_time = esp_timer_get_time() / 1000;
+                send_bus_location_to_firebase(current_latitude, current_longitude);
+            }
+        } else {
+            ESP_LOGE("GPS", "Error getting GPS location.");
+        }
+
+        if (read_rfid_card(scanned_student_id) == 0) {
+            printf("RFID Card Scanned - Student ID: %s\n", scanned_student_id);
+            mark_attendance(scanned_student_id, current_latitude, current_longitude);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // Using FreeRTOS delay
+    }
+}
